@@ -195,8 +195,137 @@ for idx1,kp1 in enumerate(keypoints):
             #pts1 pts2 filled in
             match_list[idx1][idx2] = (pts1,pts2)
 
-#match_list 완성, 
+#projection matrices 구하기
+
+extr_list = []
+P_list = []
+extr_list.append([np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0]])])
+P_list.append(np.matmul(K,extr_list[0]))
+
+
+#M12 M13 M14 가져와서 P2 P3 P4 구하자 --> match_list[0][전부]
+print("generating Projection Matrices from First Image...")
+match_one = match_list[0]
+for j, matches in enumerate(match_one):
+    #print(matches)
+    if(matches != None):
+        (pts1,pts2) = matches
+        pts1 = np.array(pts1)
+        pts2 = np.array(pts2)
+
+        F, mask = cv.findFundamentalMat(pts1,pts2,cv.FM_LMEDS) #assume normalization done in this OpenCV implementation
+        pts1mask = pts1[mask.ravel()==1]
+        pts2mask= pts1[mask.ravel()==1] 
+        E = np.matmul(np.matmul(np.transpose(K), F), K)
+        retval, R, t, mask = cv.recoverPose(E, pts1mask, pts2mask, K)
+        extr_2 = np.concatenate((R,t),axis = 1)
+        P = np.matmul(K,extr_2) 
+        extr_list.append(extr_2)
+        P_list.append(P)
+        match_list[0][j] = (pts1mask,pts2mask) #update
+
+
+
+#match_list 완성, 펼쳐서 Sparse Observation Matrix 제작
+match_size = len(match_list)
+D_spread = []
+ij_count_mat = []
+for i, row in enumerate(match_list):
+    for j, m in enumerate(row):
+        if(m != None): #i 와 j 의 match 마다 실행. 
+            pts1 = m[0]
+            pts2 = m[1]
+            ijcount = 0
+            for k , p in enumerate(pts1):
+                ij_count_mat.append([i,j])
+                col = [None] * match_size
+                col[i] = pts1[k]
+                col[j] = pts2[k]
+                D_spread.append(col)
+                ijcount+=1
+            
+
+print(str(len(D_spread)))
+
+#D_arr_spread = np.array(D_spread)
+#print(D_arr_spread.shape)
+
+def close(p1,p2):
+    (x1,y1) = p1
+    (x2,y2) = p2
+    dist = pow((x1-x2),2) + pow((y1-y2),2)
+    if(dist<1):
+        return True
+    else:
+        return False
+
+#reduce algorithm
+
+def sortFunc(row,e):
+    if(e[row] is None):
+        return 10000
+    else:
+        return e[row][0] #x로 먼저 비교
+
+
+print(len(D_spread))
+
+
+for i in range(match_size):
+    
+    D_spread.sort(key = lambda e : sortFunc(i,e))
+    print("sorted")
+    D_spread_copy = D_spread
+    
+    #p1 으로부터 다른 것 전부 보기
+
+    idx = 1 #이거를 바꾸면 됨 --------------------------------------
+
+    col = D_spread[1] #첫번째 col 부터 시작해보자
+    while(not(col[i] is None)): #비교대상이 존재
+        c1 = D_spread[idx]
+        c2 = D_spread[idx - 1]
+        new_c = []
+        if(close(c1[i],c2[i])):
+            #print("found same point")
+            #combination 은 여기서 진행
+            for idx2 in range(len(c1)):
+                p1 = c1[idx2]
+                p2 = c2[idx2]
+                same1 = False
+                same2 = False
+
+                if((p1 is None) and not(p2 is None)):
+                    new_c.append(p2)
+                elif(not(p1 is None) and (p2 is None)):
+                    new_c.append(p1)
+                elif(not(p1 is None) and not(p2 is None)):
+                    new_c.append(p1) #i의 위치다
+                else:
+                    new_c.append(None)
+            ##
+            del D_spread_copy[idx]
+            del D_spread_copy[idx-1]
+            D_spread_copy.append(new_c)
+        ## if close end
+        idx += 1
+        col = D_spread[idx]
+    ## while end
+
+    D_spread = D_spread_copy
+
+print(len(D_spread))
+
+D_spread.sort(key = lambda e : sortFunc(0,e)) #첫번째 image 로 정렬해서, 각 P 를 구하는 방법 사용
+
+D_arr = np.array(D_spread)
+print(D_arr.shape)
+
+# Get projection matrices for each image
+# 기준은 첫 이미지로
 
 
 
 
+        
+        
