@@ -126,9 +126,10 @@ cx = 315.28
 cy = 240.62
 K = np.array([[fx , 0 , cx]  ,[0  ,fy , cy]  ,[0  ,0  ,1]])
 
+dim = (1600,1200)
 
-left_orig = cv.imread("left.jpg")
-left_orig = cv.GaussianBlur(left_orig,(111,111),10)
+left_orig2 = cv.imread("left.jpg")
+left_orig = cv.GaussianBlur(left_orig2,(111,111),10)
 cv.imwrite("left_orig.jpg",left_orig)
 
 left = cv.imread("left.jpg",cv.IMREAD_GRAYSCALE)
@@ -137,7 +138,16 @@ right = cv.imread("right.jpg",cv.IMREAD_GRAYSCALE)
 left = cv.GaussianBlur(left,(5,5),1)
 right = cv.GaussianBlur(right,(5,5),1)
 
+
+left = cv.resize(left, dim, interpolation = cv.INTER_AREA)
+right = cv.resize(right, dim, interpolation = cv.INTER_AREA)
+left_orig = cv.resize(left_orig, dim, interpolation = cv.INTER_AREA)
+left_orig2 = cv.resize(left_orig2, dim, interpolation = cv.INTER_AREA)
+
+cv.imwrite("plot-img.jpg",left_orig2)
+
 """For all images, Extract feature points"""
+
 
 sift = cv.xfeatures2d.SIFT_create()
 
@@ -146,12 +156,12 @@ sift = cv.xfeatures2d.SIFT_create()
 kpL = sift.detect(left,None)
 
 shuffle(kpL)  # simulating sorting by score with random shuffle
-s_kpL = ssc(kpL, 1000, 0.01, left.shape[1], left.shape[0])
+s_kpL = ssc(kpL, 10000, 0.01, left.shape[1], left.shape[0])
 #s_kpL = kpL
 
 s_kpL,desL = sift.compute(left,s_kpL)
 
-# draw only keypoints location,not size and orientation
+# draw only keypoints location, not size and orientation
 left2 = cv.drawKeypoints(left, s_kpL, None, color=(0,255,0), flags=cv.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 siftR = cv.xfeatures2d.SIFT_create()
@@ -160,7 +170,7 @@ siftR = cv.xfeatures2d.SIFT_create()
 kpR = sift.detect(right,None)
 
 shuffle(kpR)
-s_kpR = ssc(kpR, 1000, 0.01, right.shape[1], right.shape[0])
+s_kpR = ssc(kpR, 10000, 0.01, right.shape[1], right.shape[0])
 #s_kpR = kpR
 
 s_kpR,desR = sift.compute(right,s_kpR)
@@ -172,15 +182,15 @@ right2 = cv.drawKeypoints(right, s_kpR, None, color=(0,255,0), flags=cv.DRAW_MAT
 desL = np.float32(desL)
 desR = np.float32(desR)
 
-print("got points")
+print("got points" + str(desL.shape))
 
 # FLANN parameters
 FLANN_INDEX_KDTREE = 1
 index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
 search_params = dict(checks=50)   # or pass empty dictionary
 
-flann = cv.FlannBasedMatcher(index_params,search_params)
-
+#flann = cv.FlannBasedMatcher(index_params,search_params,crossCheck = True)
+flann = cv.BFMatcher()
 # Sort them in the order of their distance.
 matches = flann.knnMatch(desL,desR,k=2)
 # Need to draw only good matches, so create a mask
@@ -198,7 +208,7 @@ draw_params = dict(matchColor = (0,255,0),
                    matchesMask = matchesMask,
                    flags = cv.DrawMatchesFlags_DEFAULT)
 
-print(len(newmatches))
+print ("knn matches:" + str(len(newmatches)))
 
 img3 = cv.drawMatchesKnn(left2,s_kpL,right2,s_kpR,matches,None,**draw_params)
 cv.imwrite("img.jpg",img3)
@@ -237,8 +247,8 @@ ptsR = np.array(list_kpR)
 L_mean = (sum(ptsL)/len(ptsL))
 R_mean = (sum(ptsR)/len(ptsR))
 
-#ptsL = [(x - L_mean) for x in ptsL]
-#ptsR = [(x - R_mean) for x in ptsR]
+ptsL = [(x - L_mean) for x in ptsL]
+ptsR = [(x - R_mean) for x in ptsR]
 
 ptsL = np.array(ptsL)
 ptsR = np.array(ptsR)
@@ -250,11 +260,12 @@ F, mask = cv.findFundamentalMat(ptsL,ptsR,cv.FM_LMEDS)
 
 # We select only inlier points
 
-#ptsL = ptsL[mask.ravel()==1]
-#ptsR = ptsR[mask.ravel()==1] 
+ptsLtmp = ptsL[mask.ravel()==1]
+ptsRtmp = ptsR[mask.ravel()==1] 
+
 # // MCMC 로 바꿔버릴 수 있다
 
-print(ptsL.shape)
+print("fundamental matrix Mask"+str(ptsL.shape))
 
 
 
@@ -273,8 +284,10 @@ print(K)
 
 ptsL2 = ptsL[:,0:2]
 ptsR2 = ptsR[:,0:2]
+ptsL2tmp = ptsLtmp[:,0:2]
+ptsR2tmp = ptsRtmp[:,0:2]
 
-retval, R, t, mask = cv.recoverPose(E, ptsL2, ptsR2, K)
+retval, R, t, mask = cv.recoverPose(E, ptsL2tmp, ptsR2tmp, K)
 #ptsL = ptsL[mask.ravel()!=0]
 #ptsR = ptsR[mask.ravel()!=0]
 
@@ -332,7 +345,7 @@ for (i, j, k) in zip(xn, yn, zn):
     posx = ptsL2[0][idx] + L_mean[0]
     posy = ptsL2[1][idx] + L_mean[1]
     
-    if(np.sqrt(i*i + j*j + k*k) < 10000 and posx < maxheight and posy < maxwidth and posx >= 0 and posy >= 0):
+    if(np.sqrt(i*i + j*j + k*k) < 100 and posx < maxheight and posy < maxwidth and posx >= 0 and posy >= 0):
         x.append(i)
         y.append(j)
         z.append(k)
@@ -383,13 +396,14 @@ print(rec_points_L.shape)
 
 #Reprojection 에러들을 확인해보자.
 L_pos = np.array(L_pos)
-im = plt.imread("left.jpg")
+im = plt.imread("plot-img.jpg")
 implot = plt.imshow(im)
 plt.scatter(rec_points_L[:,0],rec_points_L[:,1], c='r', s=5)
 plt.scatter(L_pos[:,0],L_pos[:,1], c='g', s=5)
 plt.scatter(rec_points_R[:,0],rec_points_R[:,1], c='b', s=2)
 
-plt.show()
+plt.savefig('reproject-L.png')
+#plt.show()
 
 
 
@@ -415,22 +429,27 @@ device = 'cuda:0'
 
 # D = m x n,        P = 3m x 4,         X = 4 x n
 def model(sigma):
+
+    # x = PX 
+    # P 와 X 잘 맞으면, PX --> 사진에 어떻게 보이는지.
+
     Px = pyro.sample('P', dist.Normal(P, torch.ones([D.shape[0],4]).cuda()))
     #Px = P
     X = pyro.sample('X', dist.Normal(torch.from_numpy(PTS).cuda(), torch.ones([4,D.shape[1]]).cuda()))
-    res = torch.mm(Px,X).cuda()
+    res = torch.mm(Px,X).cuda() # reproject 를 한 것.
+    res = res/res[3]
 
-    return res
+    return res # 각 사진 위에 xy 지점들
 
-def conditioned_model(model, sigma, y):
-    return poutine.condition(model, data={"obs": y})(sigma)
+#def conditioned_model(model, sigma, y):
+#    return poutine.condition(model, data={"obs": y})(sigma)
 
-nuts_kernel = NUTS(conditioned_model, adapt_step_size=True)
+nuts_kernel = NUTS(model, adapt_step_size=True)
 mcmc = MCMC(nuts_kernel,
-            num_samples=1000,
-            warmup_steps=1000,
+            num_samples=10000,
+            warmup_steps=10000,
              mp_context="spawn")
-mcmc_run = mcmc.run(model, 1, D)
+mcmc_run = mcmc.run(1)
 
 #MCMC 는 느리므로, SVI 를 이용해보자?
 
@@ -441,10 +460,10 @@ res = mcmc.get_samples()
 #P = res['P'].cpu()
 X = res['X'].mean(0).cpu()
 # 89 포인트
-p = X[3,:]
-xn = X[0,:] 
-yn = X[1,:] 
-zn = X[2,:] 
+p   = X[3,:]
+xn  = X[0,:] 
+yn  = X[1,:] 
+zn  = X[2,:] 
 
 xn = torch.div(xn, p).tolist()
 yn = torch.div(yn, p).tolist()
@@ -463,7 +482,7 @@ for (i, j, k) in zip(xn, yn, zn):
     posx = ptsL2[0][idx] + L_mean[0]
     posy = ptsL2[1][idx] + L_mean[1]
 
-    if(np.sqrt(i*i + j*j + k*k) < 200 and posx < maxwidth and posy < maxheight and posx >= 0 and posy >= 0 and k > 0):
+    if(np.sqrt(i*i + j*j + k*k) < 100 and posx < maxwidth and posy < maxheight and posx >= 0 and posy >= 0):
         #if(np.sqrt(i*i + j*j + k*k) < 30):
         x.append(i)
         y.append(j)
