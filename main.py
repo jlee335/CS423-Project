@@ -424,7 +424,7 @@ import torch.distributions.constraints as constraints
 import pyro.contrib.autoguide as autoguide
 # this is for running the notebook in our testing framework
 smoke_test = ('CI' in os.environ)
-n_steps = 2 if smoke_test else 2000
+n_steps = 2 if smoke_test else 10000
 
 # enable validation (e.g. validate parameters of distributions)
 #assert pyro.__version__.startswith('1.3.0')
@@ -439,16 +439,14 @@ prior = torch.from_numpy(PTS)#.cuda()
 prior_sigma = 0.03*torch.ones([4,D.shape[1]])#.cuda()
 ones_sigma = torch.ones([D.shape[0],D.shape[1]])#.cuda()
 
-P_flat = torch.flatten(P)
-prior_flat = torch.flatten(prior)
 
-pyro.param("auto_loc", prior)
-pyro.param("auto_scale", torch.ones([prior.shape[0],prior.shape[1]]), constraint=constraints.positive)
 
 def model(data):
     # define the hyperparameters that control the beta prior
     P0 = P
-    X0 = prior
+    #X0 = prior
+    #P0 = torch.zeros([P.shape[0],P.shape[1]])
+    X0 = torch.zeros([prior.shape[0],prior.shape[1]])
 
     p_x_axis = pyro.plate("p_x_axis", P0.shape[1])
     p_y_axis = pyro.plate("p_y_axis", P0.shape[0])
@@ -481,8 +479,8 @@ def guide(data):
     X_x_axis = pyro.plate("X_x_axis", prior.shape[1])
     X_y_axis = pyro.plate("X_y_axis", prior.shape[0])
 
-    P_q = pyro.param("P_q", P)
-    X_q = pyro.param("X_q", prior)
+    P_q = pyro.param("P_q", torch.zeros([P.shape[0],P.shape[1]]))
+    X_q = pyro.param("X_q", torch.zeros([prior.shape[0],prior.shape[1]]))
 
     with p_x_axis, p_y_axis:
         Px = pyro.sample('P', dist.Normal(P_q, P_ones))
@@ -617,6 +615,11 @@ for (i, j, k) in zip(xn, yn, zn):
         col = [float(i)/255.0 for i in col]
         colors.append(col)
     else:
+        x.append(i)
+        y.append(j)
+        z.append(k)
+        xyz.append([i,j,k])
+        colors.append([0.0,0.0,0.0])
         numfilter += 1
     idx += 1
 
