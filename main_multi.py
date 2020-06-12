@@ -127,8 +127,7 @@ cy = 240.62
 K = np.array([[fx , 0 , cx]  ,[0  ,fy , cy]  ,[0  ,0  ,1]])
 
 dim = (1600,1200)
-
-
+dim2 = (1600,1200,3)
 
 
 #1.Generating Keypoints for all images using ssc.
@@ -137,6 +136,7 @@ img_dir = os.getcwd() + '/images'
 keypoints = []
 descriptors = []
 fn_list = os.listdir(img_dir)
+images = []
 
 print(img_dir)
 
@@ -145,6 +145,20 @@ for i, filename in enumerate(fn_list):
     img     = cv.imread(img_dir + '/' + filename,cv.IMREAD_GRAYSCALE)
     img     = cv.resize(img, dim, interpolation = cv.INTER_AREA)
     img     = cv.GaussianBlur(img,(5,5),1)
+
+    img_col     = cv.imread(img_dir + '/' + filename)
+    R = cv.GaussianBlur(cv.resize(img_col[:,:,0],dim),(51,51),10)
+    G = cv.GaussianBlur(cv.resize(img_col[:,:,1],dim),(51,51),10)
+    B = cv.GaussianBlur(cv.resize(img_col[:,:,2],dim),(51,51),10)
+    new_img = np.zeros((dim[1],dim[0],3))
+    new_img[:,:,0] = R
+    new_img[:,:,1] = G
+    new_img[:,:,2] = B
+    
+    cv.imwrite("new_img.jpg",new_img)
+
+    images.append(new_img)
+
     kp      = sift.detect(img,None)
     shuffle(kp)  # simulating sorting by score with random shuffle
     s_kp = ssc(kp, 10000, 0.01, img.shape[1], img.shape[0])
@@ -168,6 +182,9 @@ match_list = [[]] #list of list 형태다
 
 match_list = [[None]*len(keypoints) for _ in range(len(keypoints))]
 
+zeromeans = []
+compmeans = []
+
 for idx1,kp1 in enumerate(keypoints):
     des1 = descriptors[idx1]
     for idx2,kp2 in enumerate(keypoints):
@@ -185,23 +202,38 @@ for idx1,kp1 in enumerate(keypoints):
                 if m.distance < 0.7*n.distance: # == 서로 비슷하면
                     (x1,y1) = kp1[m.queryIdx].pt
                     (x2,y2) = kp2[m.trainIdx].pt
-                    x1 = int(x1)
-                    x2 = int(x2)
-                    y1 = int(y1)
-                    y2 = int(y2)
 
                     pts1.append((x1,y1))
                     pts2.append((x2,y2))
             #pts1 pts2 filled in
-            match_list[idx1][idx2] = (pts1,pts2)
+            mean_1 = (sum(np.array(pts1))/len(pts1))
+            mean_2 = (sum(np.array(pts2))/len(pts2))
+            if(idx1 == 0):
+                zeromeans.append((mean_1,len(pts1)))
+                compmeans.append((mean_2,len(pts1)))
+            #match_list[2] == x_Mean and y_Mean
+            match_list[idx1][idx2] = (pts1,pts2,mean_1,mean_2)
+            print("match " + str(idx1) + " ** " + str(idx2) + " == " + str(len(pts1)))
 
-#projection matrices 구하기
+
+
+#0 에 대해 mean 통일? 0만 쓰자? 
+zeromean = 0.0
+for mean in zeromeans: #weighted summation
+    zeromean += mean[0]/float(mean[1])
+
 
 extr_list = []
 P_list = []
-extr_list.append([np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0]])])
-P_list.append(np.matmul(K,extr_list[0]))
+extr0 = np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0]])
+P0 = np.matmul(K,extr0)
 
+extr_list.append(extr0)
+
+P_list.append(P0)
+
+#Image 당 Mean 을 여기서 구하자
+match_size = len(match_list)
 
 #M12 M13 M14 가져와서 P2 P3 P4 구하자 --> match_list[0][전부]
 print("generating Projection Matrices from First Image...")
@@ -209,38 +241,85 @@ match_one = match_list[0]
 for j, matches in enumerate(match_one):
     #print(matches)
     if(matches != None):
-        (pts1,pts2) = matches
-        pts1 = np.array(pts1)
-        pts2 = np.array(pts2)
+        print("P between 0 and " + str(j))
+        (pts1_unnorm,pts2_unnorm,mean_1,mean_2) = matches
+        pts1_unnorm = np.array(pts1_unnorm)
+        pts2_unnorm = np.array(pts2_unnorm)
+
+        pts1 = np.array([(x - mean_1) for x in pts1_unnorm])
+        pts2 = np.array([(x - mean_2) for x in pts2_unnorm])
+        
+        #pts1 = pts1_unnorm
+        #pts2 = pts2_unnorm
 
         F, mask = cv.findFundamentalMat(pts1,pts2,cv.FM_LMEDS) #assume normalization done in this OpenCV implementation
+        
         pts1mask = pts1[mask.ravel()==1]
-        pts2mask= pts1[mask.ravel()==1] 
+        pts2mask = pts2[mask.ravel()==1] 
+        
         E = np.matmul(np.matmul(np.transpose(K), F), K)
+
         retval, R, t, mask = cv.recoverPose(E, pts1mask, pts2mask, K)
+
         extr_2 = np.concatenate((R,t),axis = 1)
+
         P = np.matmul(K,extr_2) 
         extr_list.append(extr_2)
         P_list.append(P)
-        match_list[0][j] = (pts1mask,pts2mask) #update
+        #P1 = P_list[0]
 
-
+print(P_list)
 
 #match_list 완성, 펼쳐서 Sparse Observation Matrix 제작
-match_size = len(match_list)
 D_spread = []
 ij_count_mat = []
 for i, row in enumerate(match_list):
     for j, m in enumerate(row):
         if(m != None): #i 와 j 의 match 마다 실행. 
-            pts1 = m[0]
-            pts2 = m[1]
+            #pts1 = m[0]
+            #pts2 = m[1]
+            (pts1,pts2,mean_1,mean_2) = m
+
+            pts1_norm = [(x - mean_1) for x in pts1]
+            pts2_norm = [(x - mean_2) for x in pts2]
+
+            P1 = P_list[i]
+            P2 = P_list[j]
+            PTS = cv.triangulatePoints(P1,P2,np.transpose(np.array(pts1_norm)),np.transpose(np.array(pts2_norm)))
+            print("between " + str(i) + " - " + str(j))
+            PTS /= PTS[3]
+            
             ijcount = 0
             for k , p in enumerate(pts1):
                 ij_count_mat.append([i,j])
-                col = [None] * match_size
+                col = [None] * (match_size + 2)
                 col[i] = pts1[k]
                 col[j] = pts2[k]
+                ###############################################################
+                if(i==0):
+                    col[match_size] = PTS[:,k]
+                else:
+                    col[match_size] = None
+                ###############################################################
+                #col[match_size] = (i,j) #ij 넘겨서 mean 구한 후에 이거를 하자
+                #Extract colour as well.
+                posx = pts1[k][0]
+                posy = pts1[k][1]
+
+                if(posx < images[i].shape[0] and posy < images[i].shape[1] and posx>0 and posy>0):
+                    colour = images[i][int(posy),int(posx)].tolist()
+                    B = colour[0]
+                    G = colour[1]
+                    R = colour[2]
+                    colour = [R,G,B]
+                    colour = [float(i)/255.0 for i in colour]
+                else:
+                    colour = [0.0,0.0,0.0]
+
+                col[match_size + 1] = colour
+
+                if(col[match_size] is None):
+                    col[match_size + 1] = None
                 D_spread.append(col)
                 ijcount+=1
             
@@ -309,23 +388,231 @@ for i in range(match_size):
             D_spread_copy.append(new_c)
         ## if close end
         idx += 1
+        if(idx == len(D_spread)):
+            break
         col = D_spread[idx]
     ## while end
 
     D_spread = D_spread_copy
 
-print(len(D_spread))
-
 D_spread.sort(key = lambda e : sortFunc(0,e)) #첫번째 image 로 정렬해서, 각 P 를 구하는 방법 사용
 
-D_arr = np.array(D_spread)
+#PTS triangulation 을 여기서 실행하자
+#D_spread 에 대하여 전체 평균을 구하자
+
+
+
+#PTS 를 구해보자
+for i, row in enumerate(match_list):
+    for j, m in enumerate(row):
+        if(m != None): #i 와 j 의 match 마다 실행. 
+            pts1 = m[0]
+            pts2 = m[1]
+            
+colours = []
+
+PTS = []
+for i,col in enumerate(D_spread):
+    colour = col.pop()
+    X = col.pop()
+    if(not(X is None)):
+        PTS.append(X)
+    if(not(colour is None)):
+        colours.append(colour)
+
+#D_arr 확장시켜야 한다.
+#686 * 4 --> 686 * 12 Array 로 변경
+
+D_new = []
+
+missing_points = 0
+for col in D_spread:
+    newcol = []
+    for pts in col:
+        if(pts is None):
+            newcol.append(0.0)
+            newcol.append(0.0)
+            newcol.append(0.0)
+            missing_points += 1
+        else:
+            newcol.append(pts[0])
+            newcol.append(pts[1])
+            newcol.append(1.0)
+    D_new.append(newcol)
+
+print("missing points : " + str(missing_points))
+
+D_arr = np.array(D_new)
+D = torch.from_numpy(D_arr).cuda()
+X_arr = np.array(PTS)
+
 print(D_arr.shape)
+print(X_arr.shape)
 
-# Get projection matrices for each image
-# 기준은 첫 이미지로
+X_arr = np.transpose(X_arr)
+print(X_arr.shape)
+#P 안에 projection matrices 존재
 
+p =     X_arr[3,:]
+xn =    X_arr[0,:] 
+yn =    X_arr[1,:] 
+zn =    X_arr[2,:] 
 
+print(str(X_arr.shape) + " -- " + str(len(colours)))
 
+x = []
+y = []
+z = []
+xyz = []
+xyzH = []
+L_pos = []
+idx = 0
+numfilter = 0
+#mask 만들자
+mask = [True]*len(colours)
+#print(len(mask))
+for (i, j, k) in zip(xn, yn, zn):
 
+    if(np.sqrt(i*i + j*j + k*k) < 10):
+        x.append(i)
+        y.append(j)
+        z.append(k)
         
-        
+        xyz.append([i,j,k])
+        xyzH.append([i,j,k,1])
+    else:
+        mask[idx] = False
+    idx += 1
+colours = (np.array(colours)[mask]).tolist()
+
+P_np = np.array(P_list[0])
+for i, Projs in enumerate(P_list):
+    if(i != 0):
+        P_np = np.concatenate((P_np,Projs),axis = 0)
+
+PTS = np.transpose(np.array(xyzH))
+print(PTS.shape)
+print(P_np.shape)
+
+
+
+rep = np.matmul(P,PTS)
+
+#print("Filtered:" + str(numfilter))
+print(str(len(xyz)) + " --- " + str(len(colours)))
+
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(xyz)
+pcd.colors = o3d.utility.Vector3dVector(colours)
+
+o3d.io.write_point_cloud("sync_multi.ply", pcd)
+
+pcd_load = o3d.io.read_point_cloud("sync_multi.ply")
+xyz_load = np.asarray(pcd_load.points)
+o3d.visualization.draw_geometries([pcd_load],width = 1000,height = 1000)
+
+
+
+# Pyro Code Start
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
+logging.basicConfig(format='%(message)s', level=logging.INFO)
+pyro.enable_validation(__debug__)
+pyro.set_rng_seed(0)
+
+device = 'cuda:0'
+P = torch.from_numpy(P_np).cuda()
+prior = torch.from_numpy(PTS).cuda()
+# D = m x n,        P = 3m x 4,         X = 4 x n
+def model(D):
+
+    # x = PX 
+    # P 와 X 잘 맞으면, PX --> 사진에 어떻게 보이는지.
+
+    Px = pyro.sample('P', dist.Normal(P, torch.ones([P.shape[0],4]).cuda()))
+    #Px = P
+    X = pyro.sample('X', dist.Normal(prior, torch.ones([4,prior.shape[1]]).cuda()))
+    res = torch.mm(Px,X).cuda() # reproject 를 한 것.
+    res = res/res[3]
+    print("gotres")
+
+    error = 0.0
+    cnt = D.shape[0]*D.shape[1]
+    #comparing D with res
+    for i in range(D.shape[0]):
+        for j in range(D.shape[1]):
+            if(D[i,j]) != 0.0:
+                res[i,j] = x1
+                D[i,j] = x2
+                distance = np.sqrt(pow((x1-x2),2))
+                error += distance
+    error /= cnt
+    y_hidden_dist = dist.Normal(error,1)
+    y_real = pyro.sample("obs_{}".format(i), 
+                             y_hidden_dist, 
+                             obs = 0)
+
+    #res 가 sample 결과고, 비교대상이 D <- observation
+
+    return res # 각 사진 위에 xy 지점들
+
+#def conditioned_model(model, sigma, y):
+#    return poutine.condition(model, data={"obs": y})(sigma)
+
+nuts_kernel = NUTS(model, adapt_step_size=True)
+mcmc = MCMC(nuts_kernel,
+            num_samples=1000,
+            warmup_steps=1000,
+             mp_context="spawn")
+mcmc_run = mcmc.run(D)
+
+#MCMC 는 느리므로, SVI 를 이용해보자?
+
+#posterior = EmpiricalMarginal(mcmc_run, 'beta')
+res = mcmc.get_samples()
+
+
+#P = res['P'].cpu()
+X = res['X'].mean(0).cpu()
+# Pyro Code End
+
+# 89 포인트
+p   = X[3,:]
+xn  = X[0,:] 
+yn  = X[1,:] 
+zn  = X[2,:] 
+
+xn = torch.div(xn, p).tolist()
+yn = torch.div(yn, p).tolist()
+zn = torch.div(zn, p).tolist()
+
+x = []
+y = []
+z = []
+xyz = []
+colors = []
+idx = 0
+
+numfilter = 0
+
+for (i, j, k) in zip(xn, yn, zn):
+    if(True):
+        #if(np.sqrt(i*i + j*j + k*k) < 30):
+        x.append(i)
+        y.append(j)
+        z.append(k)
+        xyz.append([i,j,k])
+    else:
+        numfilter += 1
+    idx += 1
+
+print("Filtered:" + str(numfilter))
+
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(xyz)
+pcd.colors = o3d.utility.Vector3dVector(colors)
+o3d.io.write_point_cloud("sync.ply", pcd)
+pcd_load = o3d.io.read_point_cloud("sync.ply")
+xyz_load = np.asarray(pcd_load.points)
+o3d.visualization.draw_geometries([pcd_load],width = 1000,height = 1000)
+
+print("bp")

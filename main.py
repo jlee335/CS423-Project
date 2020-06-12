@@ -47,6 +47,7 @@ import copy
 from ssc import *
 from helper import *
 import open3d as o3d
+import os
 
 
 
@@ -314,23 +315,21 @@ ptsR2 = np.transpose(ptsR2)
 PTS = cv.triangulatePoints(P_R,P_L,ptsR2,ptsL2)
 
 PTS /= PTS[3]
-
+print(PTS.shape)
 #U,S,V = torch.svd(D, some=False, compute_uv=True, out=None)
 #print(U.shape)
-P = torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).cuda()
+P = torch.from_numpy(np.concatenate((P_L,P_R),axis = 0))#.cuda()
 
 D_list = [ptsL,ptsR]
 Darr = np.array(D_list).reshape(6,-1)
-D = torch.from_numpy(Darr).cuda()
+D = torch.from_numpy(Darr)#.cuda()
 
 p = PTS[3,:]
 xn = PTS[0,:] 
 yn = PTS[1,:] 
 zn = PTS[2,:] 
 
-x = []
-y = []
-z = []
+
 xyz = []
 xyzH = []
 colors = []
@@ -346,10 +345,7 @@ for (i, j, k) in zip(xn, yn, zn):
     posy = ptsL2[1][idx] + L_mean[1]
     
     if(np.sqrt(i*i + j*j + k*k) < 100 and posx < maxheight and posy < maxwidth and posx >= 0 and posy >= 0):
-        x.append(i)
-        y.append(j)
-        z.append(k)
-        
+
         L_pos.append([posx,posy])
         xyz.append([i,j,k])
         xyzH.append([i,j,k,1])
@@ -420,36 +416,156 @@ print("bp")
 
 
 print(D.shape)
-torch.set_default_tensor_type('torch.cuda.FloatTensor')
+# Pyro Code Start
+from pyro.optim import Adam
+from pyro.infer import SVI, Trace_ELBO
+import pyro.distributions as dist
+import torch.distributions.constraints as constraints
+import pyro.contrib.autoguide as autoguide
+# this is for running the notebook in our testing framework
+smoke_test = ('CI' in os.environ)
+n_steps = 2 if smoke_test else 2000
+
+# enable validation (e.g. validate parameters of distributions)
+#assert pyro.__version__.startswith('1.3.0')
+pyro.enable_validation(True)
+
+# clear the param store in case we're in a REPL
+pyro.clear_param_store()
+
+Data = torch.flatten(D)
+P_ones = torch.ones([P.shape[0],P.shape[1]])
+prior = torch.from_numpy(PTS)#.cuda()
+prior_sigma = 0.03*torch.ones([4,D.shape[1]])#.cuda()
+ones_sigma = torch.ones([D.shape[0],D.shape[1]])#.cuda()
+
+P_flat = torch.flatten(P)
+prior_flat = torch.flatten(prior)
+
+pyro.param("auto_loc", prior)
+pyro.param("auto_scale", torch.ones([prior.shape[0],prior.shape[1]]), constraint=constraints.positive)
+
+def model(data):
+    # define the hyperparameters that control the beta prior
+    P0 = P
+    X0 = prior
+
+    p_x_axis = pyro.plate("p_x_axis", P0.shape[1])
+    p_y_axis = pyro.plate("p_y_axis", P0.shape[0])
+    with p_x_axis, p_y_axis:
+        Px = pyro.sample('P', dist.Normal(P0, P_ones))
+
+
+    X_x_axis = pyro.plate("X_x_axis", X0.shape[1])
+    X_y_axis = pyro.plate("X_y_axis", X0.shape[0])
+    #Px = P
+    with X_x_axis, X_y_axis:
+        X = pyro.sample('X', dist.Normal(X0, prior_sigma))
+
+    res = torch.mm(Px,X)#.cuda() # reproject 를 한 것.
+    res = res/res[3]
+    D_x_axis = pyro.plate("D_x_axis", data.shape[1])
+    D_y_axis = pyro.plate("D_y_axis", data.shape[0])
+    with D_x_axis,D_y_axis:
+        pyro.sample('obs', dist.Normal(res,ones_sigma), obs=data)
+
+P_nil = torch.tensor(600*np.ones((P.shape[0],P.shape[1])))
+prior_nil = torch.tensor(np.ones((prior.shape[0],prior.shape[1])))
+
+#guide = autoguide.AutoDiagonalNormal(model)
+def guide(data):
+    # define the hyperparameters that control the beta prior
+
+    p_x_axis = pyro.plate("p_x_axis", P.shape[1])
+    p_y_axis = pyro.plate("p_y_axis", P.shape[0])
+    X_x_axis = pyro.plate("X_x_axis", prior.shape[1])
+    X_y_axis = pyro.plate("X_y_axis", prior.shape[0])
+
+    P_q = pyro.param("P_q", P)
+    X_q = pyro.param("X_q", prior)
+
+    with p_x_axis, p_y_axis:
+        Px = pyro.sample('P', dist.Normal(P_q, P_ones))
+    
+    #Px = P
+    with X_x_axis, X_y_axis:
+        X = pyro.sample('X', dist.Normal(X_q, prior_sigma))
+
+    res = torch.mm(Px,X)#.cuda() # reproject 를 한 것.
+    res = res/res[3]
+    D_x_axis = pyro.plate("D_x_axis", data.shape[1])
+    D_y_axis = pyro.plate("D_y_axis", data.shape[0])
+    with D_x_axis,D_y_axis:
+        pyro.sample('obs', dist.Normal(res,ones_sigma), obs=data)
+
+    #res 가 sample 결과고, 비교대상이 D <- observation
+# setup the optimizer
+loss = pyro.infer.JitTraceGraph_ELBO()
+adam_params = {"lr": 0.0005}
+optimizer = Adam(adam_params)
+
+#guide = autoguide.AutoDiagonalNormal(model)
+svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
+
+loss = pyro.infer.JitTraceGraph_ELBO()
+#svi = SVI(model, guide, optimizer, loss)
+
+
+losses = np.empty(n_steps)
+for step in range(n_steps):
+    losses[step] = svi.step(D)
+    if step % 100 == 0:
+        print(f"step: {step:>5}, ELBO loss: {losses[step]:.2f}")
+    #return res # 각 사진 위에 xy 지점들
+
+posterior = pyro.infer.Predictive
+X = pyro.param("X_q")
+print(type(X))
+
+'''
+#torch.set_default_tensor_type('torch.cuda.FloatTensor')
 logging.basicConfig(format='%(message)s', level=logging.INFO)
 pyro.enable_validation(__debug__)
 pyro.set_rng_seed(0)
 
-device = 'cuda:0'
+#device = 'cuda:0'
 
+prior = torch.from_numpy(PTS)#.cuda()
+prior_sigma = 0.03*torch.ones([4,D.shape[1]])#.cuda()
+ones_sigma = torch.ones([D.shape[0],D.shape[1]])#.cuda()
 # D = m x n,        P = 3m x 4,         X = 4 x n
-def model(sigma):
+one = torch.ones(1)
+zeros = torch.zeros(1)
+def model(truth):
 
     # x = PX 
     # P 와 X 잘 맞으면, PX --> 사진에 어떻게 보이는지.
 
-    Px = pyro.sample('P', dist.Normal(P, torch.ones([D.shape[0],4]).cuda()))
+    Px = pyro.sample('P', dist.Normal(P, torch.ones([D.shape[0],4])))
     #Px = P
-    X = pyro.sample('X', dist.Normal(torch.from_numpy(PTS).cuda(), torch.ones([4,D.shape[1]]).cuda()))
-    res = torch.mm(Px,X).cuda() # reproject 를 한 것.
+    X = pyro.sample('X', dist.Normal(prior, prior_sigma))
+    res = torch.mm(Px,X)#.cuda() # reproject 를 한 것.
     res = res/res[3]
 
-    return res # 각 사진 위에 xy 지점들
+    distance = torch.dist(truth,res,2)
+    
+    y = pyro.sample('y', dist.Normal(distance,one), obs=zeros)
+    return y
+
+
+    #res 가 sample 결과고, 비교대상이 D <- observation
+
+    #return res # 각 사진 위에 xy 지점들
 
 #def conditioned_model(model, sigma, y):
 #    return poutine.condition(model, data={"obs": y})(sigma)
 
 nuts_kernel = NUTS(model, adapt_step_size=True)
 mcmc = MCMC(nuts_kernel,
-            num_samples=10000,
-            warmup_steps=10000,
+            num_samples=1000,
+            warmup_steps=1000,
              mp_context="spawn")
-mcmc_run = mcmc.run(1)
+mcmc_run = mcmc.run(D)
 
 #MCMC 는 느리므로, SVI 를 이용해보자?
 
@@ -459,6 +575,9 @@ res = mcmc.get_samples()
 
 #P = res['P'].cpu()
 X = res['X'].mean(0).cpu()
+'''
+# Pyro Code End
+
 # 89 포인트
 p   = X[3,:]
 xn  = X[0,:] 
