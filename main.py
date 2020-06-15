@@ -49,6 +49,48 @@ from helper import *
 import open3d as o3d
 import os
 
+
+def isRotationMatrix(R) :
+    Rt = np.transpose(R)
+    shouldBeIdentity = np.dot(Rt, R)
+    I = np.identity(3, dtype = R.dtype)
+    n = np.linalg.norm(I - shouldBeIdentity)
+    return n < 1e-6
+
+def rotationMatrixToEulerAngles(R) :
+    assert(isRotationMatrix(R))
+    sy = math.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
+    singular = sy < 1e-6
+    if  not singular :
+        x = math.atan2(R[2,1] , R[2,2])
+        y = math.atan2(-R[2,0], sy)
+        z = math.atan2(R[1,0], R[0,0])
+    else :
+        x = math.atan2(-R[1,2], R[1,1])
+        y = math.atan2(-R[2,0], sy)
+        z = 0
+    return np.array([x, y, z])
+
+
+# Calculates Rotation Matrix given euler angles.
+
+def eulerAnglesToRotationMatrix(theta) :
+    R_x = np.array([[1,         0,                  0                   ],
+                    [0,         math.cos(theta[0]), -math.sin(theta[0]) ],
+                    [0,         math.sin(theta[0]), math.cos(theta[0])  ]])
+    R_y = np.array([[math.cos(theta[1]),    0,      math.sin(theta[1])  ],
+                    [0,                     1,      0                   ],
+                    [-math.sin(theta[1]),   0,      math.cos(theta[1])  ]])
+    R_z = np.array([[math.cos(theta[2]),    -math.sin(theta[2]),    0],
+                    [math.sin(theta[2]),    math.cos(theta[2]),     0],
+                    [0,                     0,                      1]])
+    R = np.dot(R_z, np.dot( R_y, R_x ))
+
+    return R
+
+
+
+
 cuda = False
 
 def ssc(keypoints, num_ret_points, tolerance, cols, rows):
@@ -257,7 +299,7 @@ ptsR = np.array(ptsR)
 #ptsL = cv.undistortPoints(ptsL, K,None)
 #ptsR = cv.undistortPoints(ptsR, K,None)
 
-F, mask = cv.findFundamentalMat(ptsL,ptsR,cv.FM_LMEDS)
+F, mask = cv.findFundamentalMat(ptsL,ptsR,cv.FM_LMEDS) #cv.RANSAC
 
 # We select only inlier points
 
@@ -462,8 +504,30 @@ if(cuda):
 
 #Pre-made Zeros or Ones distributions
 P_ones = torch.ones([P.shape[0],P.shape[1]])
-prior_sigma = 0.03*torch.ones([4,prior.shape[1]])
+prior_sigma = torch.ones([4,prior.shape[1]])
 ones_sigma = torch.ones([D_prior.shape[0],D_prior.shape[1]])
+
+#######################TEST TEST TEST############################
+
+alpha = alpha_prior
+beta = beta_prior
+gamma = gamma_prior
+
+x_t = t_prior[0]
+y_t = t_prior[1]
+z_t = t_prior[2]
+
+[alpha,beta,gamma] = rotationMatrixToEulerAngles(R_prior.numpy())
+R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float()
+t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
+extr_R = torch.cat((R,t),1)                             #3x4
+
+P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+
+Px =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+
+
+#######################TEST TEST TEST############################
 
 if(cuda):
     P_ones.cuda()
@@ -482,39 +546,37 @@ def model(data):
     #TODO: R t constraints 추가해서 조금 더 현실적으로 ㄱㄱ
     #Properties of P --> P = K * Extr
     #Extrinsic Sampling 하기
-    alpha = pyro.sample('alpha', dist.Normal(alpha_prior,0.01))
-    beta = pyro.sample('beta', dist.Normal(beta_prior,0.01))
-    gamma = pyro.sample('gamma', dist.Normal(gamma_prior,0.01))
+    alpha = pyro.sample('alpha', dist.Normal(alpha_prior,0.1))
+    beta = pyro.sample('beta', dist.Normal(beta_prior,0.1))
+    gamma = pyro.sample('gamma', dist.Normal(gamma_prior,0.1))
 
-    x_t = pyro.sample('x_t', dist.Normal(t_prior[0],0.01))
-    y_t = pyro.sample('y_t', dist.Normal(t_prior[1],0.01))
-    z_t = pyro.sample('z_t', dist.Normal(t_prior[2],0.01))
+    x_t = pyro.sample('x_t', dist.Normal(t_prior[0],0.5))
+    y_t = pyro.sample('y_t', dist.Normal(t_prior[1],0.5))
+    z_t = pyro.sample('z_t', dist.Normal(t_prior[2],0.5))
     #Construct P using info sampled above
-    alpha_mat = torch.tensor([   [1.,0.,0.],                            [0.,math.cos(alpha),-math.sin(alpha)],  [0.,math.sin(alpha),math.cos(alpha)]])
-    beta_mat = torch.tensor ([   [math.cos(beta),0.,math.sin(beta)],    [0.,1.,0.],                             [-math.sin(beta),0.,math.cos(beta)]])
-    gamma_mat = torch.tensor([   [math.cos(gamma),-math.sin(gamma),0.], [math.sin(gamma),math.cos(gamma),0.],   [0.,0.,1.]])
 
-    R = torch.mm(torch.mm(alpha_mat,beta_mat),gamma_mat)    #3x3
+    R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float() 
     t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
     extr_R = torch.cat((R,t),1)                             #3x4
 
     P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+
     Px =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
-
-
 
     X_x_axis = pyro.plate("X_x_axis", X0.shape[1])
     X_y_axis = pyro.plate("X_y_axis", X0.shape[0])
     #Px = P
     with X_x_axis, X_y_axis:
         X = pyro.sample('X', dist.Normal(X0, prior_sigma))
+        #div = X[3,:].clone().detach()
+        #X = torch.div(X,div)
         if(cuda):
             X.cuda()
 
     res = torch.mm(Px,X)# reproject 를 한 것.
     if(cuda):
         res.cuda()
-    #res = res/res[3]
+   
     D_x_axis = pyro.plate("D_x_axis", data.shape[1])
     D_y_axis = pyro.plate("D_y_axis", data.shape[0])
     with D_x_axis,D_y_axis:
@@ -532,29 +594,25 @@ def guide(data):
     X_y_axis = pyro.plate("X_y_axis", prior.shape[0])
 
     #TODO: R t constraints 추가해서 조금 더 현실적으로 ㄱㄱ
-    X_q = pyro.param("X_q", torch.zeros([prior.shape[0],prior.shape[1]]))
+    X_q =           pyro.param("X_q", torch.zeros([prior.shape[0],prior.shape[1]]))
 
     alpha_q =       pyro.param("alpha_q",torch.tensor(alpha_prior))
     beta_q =        pyro.param("beta_q",torch.tensor(beta_prior))
     gamma_q =       pyro.param("gamma_q",torch.tensor(gamma_prior))
-    x_t_q =         pyro.param("x_t_q",torch.tensor(t_prior[0]))
-    y_t_q =         pyro.param("y_t_q",torch.tensor(t_prior[1]))
-    z_t_q =         pyro.param("z_t_q",torch.tensor(t_prior[2]))
+    x_t_q =         pyro.param("x_t_q",t_prior[0])
+    y_t_q =         pyro.param("y_t_q",t_prior[1])
+    z_t_q =         pyro.param("z_t_q",t_prior[2])
 
-    alpha = pyro.sample('alpha', dist.Normal(alpha_q,1))
-    beta = pyro.sample('beta', dist.Normal(beta_q,1))
-    gamma = pyro.sample('gamma', dist.Normal(gamma_q,1))
+    alpha = pyro.sample('alpha', dist.Normal(alpha_q,0.1))
+    beta = pyro.sample('beta', dist.Normal(beta_q,0.1))
+    gamma = pyro.sample('gamma', dist.Normal(gamma_q,0.1))
 
-    x_t = pyro.sample('x_t', dist.Normal(x_t_q,1))
-    y_t = pyro.sample('y_t', dist.Normal(y_t_q,1))
-    z_t = pyro.sample('z_t', dist.Normal(z_t_q,1))
+    x_t = pyro.sample('x_t', dist.Normal(x_t_q,0.5))
+    y_t = pyro.sample('y_t', dist.Normal(y_t_q,0.5))
+    z_t = pyro.sample('z_t', dist.Normal(z_t_q,0.5))
     #Construct P using info sampled above
-    alpha_mat = torch.tensor([   [1.,0.,0.],                            [0.,math.cos(alpha),-math.sin(alpha)],  [0.,math.sin(alpha),math.cos(alpha)]])
-    beta_mat = torch.tensor ([   [math.cos(beta),0.,math.sin(beta)],    [0.,1.,0.],                             [-math.sin(beta),0.,math.cos(beta)]])
-    gamma_mat = torch.tensor([   [math.cos(gamma),-math.sin(gamma),0.], [math.sin(gamma),math.cos(gamma),0.],   [0.,0.,1.]])
-
-    R = torch.mm(torch.mm(alpha_mat,beta_mat),gamma_mat)    #3x3
-    t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
+    R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float() 
+    t = torch.tensor([[x_t],[y_t],[z_t]]).float()  
     extr_R = torch.cat((R,t),1)                             #3x4
 
     P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
@@ -569,15 +627,15 @@ def guide(data):
     #Px = P
     with X_x_axis, X_y_axis:
         X = pyro.sample('X', dist.Normal(X_q, prior_sigma))
-        div = X[3,:].clone()
-        X /= div
+        #div = X[3,:].clone().detach()
+        #X = torch.div(X,div)
         if(cuda):
             X.cuda()
 
     res = torch.mm(Px,X) # reproject 를 한 것.
     if(cuda):
         res.cuda()
-    #res = res/res[3]
+    
     D_x_axis = pyro.plate("D_x_axis", data.shape[1])
     D_y_axis = pyro.plate("D_y_axis", data.shape[0])
     with D_x_axis,D_y_axis:
@@ -592,7 +650,7 @@ adam_params = {"lr": 0.005, "betas": (0.95, 0.999)}
 optimizer = Adam(adam_params)
 
 #guide = autoguide.AutoDiagonalNormal(model)
-svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
+svi = SVI(model, guide, optimizer, loss)
 
 loss = pyro.infer.JitTraceGraph_ELBO()
 #svi = SVI(model, guide, optimizer, loss)
@@ -605,8 +663,8 @@ for step in range(n_steps):
         print(f"step: {step:>5}, ELBO loss: {losses[step]:.2f}")
     #return res # 각 사진 위에 xy 지점들
 
-posterior = pyro.infer.Predictive
-X = pyro.param("X_q")
+X =             pyro.param("X_q")
+
 
 alpha =       pyro.param("alpha_q")
 beta =        pyro.param("beta_q")
@@ -614,12 +672,9 @@ gamma =       pyro.param("gamma_q")
 x_t =         pyro.param("x_t_q")
 y_t =         pyro.param("y_t_q")
 z_t =         pyro.param("z_t_q")
-alpha_mat = torch.tensor([   [1.,0.,0.],                            [0.,math.cos(alpha),-math.sin(alpha)],  [0.,math.sin(alpha),math.cos(alpha)]])
-beta_mat = torch.tensor ([   [math.cos(beta),0.,math.sin(beta)],    [0.,1.,0.],                             [-math.sin(beta),0.,math.cos(beta)]])
-gamma_mat = torch.tensor([   [math.cos(gamma),-math.sin(gamma),0.], [math.sin(gamma),math.cos(gamma),0.],   [0.,0.,1.]])
 
-R = torch.mm(torch.mm(alpha_mat,beta_mat),gamma_mat)    #3x3
-t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
+R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float() 
+t = torch.tensor([[x_t],[y_t],[z_t]]).float()                 #3x1
 extr_R = torch.cat((R,t),1)                             #3x4
 
 P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
@@ -635,9 +690,12 @@ Reproject_after  = torch.mm(P_after,X)
 dist_prior1 = torch.dist(D_prior,Reproject_before,2)
 dist_prior2 = torch.dist(D_prior,Reproject_after,2)
 
+X_dist = torch.dist(X,torch.from_numpy(PTS))
+P_dist = torch.dist(P_after,P_bef)
+
 print("distance prior: " + str(dist_prior1) + " --- inferred: " + str(dist_prior2))
 
-
+print("X_dist: " + str(X_dist) + " --- P_dist: " + str(P_dist))
 
 
 
@@ -698,6 +756,9 @@ X = res['X'].mean(0).cpu()
 # Pyro Code End
 
 # 89 포인트
+div = X[3,:].clone().detach()
+X = torch.div(X,div)
+
 p   = X[3,:]
 xn  = X[0,:] 
 yn  = X[1,:] 
@@ -707,16 +768,24 @@ xn = torch.div(xn, p).tolist()
 yn = torch.div(yn, p).tolist()
 zn = torch.div(zn, p).tolist()
 
+p_bef   = PTS[3,:]
+xn_bef  = PTS[0,:] 
+yn_bef  = PTS[1,:] 
+zn_bef  = PTS[2,:] 
+
+
 x = []
 y = []
 z = []
 xyz = []
+xyz_bef = []
 colors = []
+colors_bef = []
 idx = 0
 
 numfilter = 0
 num_imgconst = 0
-for (i, j, k) in zip(xn, yn, zn):
+for (i, j, k,ib,jb,kb) in zip(xn, yn, zn,xn_bef,yn_bef,zn_bef):
     posx = ptsL2[0][idx] + L_mean[0]
     posy = ptsL2[1][idx] + L_mean[1]
     
@@ -731,6 +800,8 @@ for (i, j, k) in zip(xn, yn, zn):
         z.append(k)
         
         xyz.append([i,j,k])
+        xyz_bef.append([ib,jb,kb])
+        colors_bef.append([0.8,0.5,0.5])
 
         col = left_orig[int(posy),int(posx)].tolist()
         B = col[0]
@@ -753,8 +824,11 @@ print("Image constraint :" + str(num_imgconst))
 
 
 pcd = o3d.geometry.PointCloud()
-pcd.points = o3d.utility.Vector3dVector(xyz)
-pcd.colors = o3d.utility.Vector3dVector(colors)
+
+xyz_bef = []
+colors_bef = []
+pcd.points = o3d.utility.Vector3dVector(xyz + xyz_bef)
+pcd.colors = o3d.utility.Vector3dVector(colors + colors_bef)
 o3d.io.write_point_cloud("sync.ply", pcd)
 pcd_load = o3d.io.read_point_cloud("sync.ply")
 xyz_load = np.asarray(pcd_load.points)
