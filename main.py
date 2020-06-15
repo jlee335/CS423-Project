@@ -49,7 +49,7 @@ from helper import *
 import open3d as o3d
 import os
 
-
+cuda = False
 
 def ssc(keypoints, num_ret_points, tolerance, cols, rows):
     exp1 = rows + cols + 2 * num_ret_points
@@ -288,7 +288,9 @@ ptsR2 = ptsR[:,0:2]
 ptsL2tmp = ptsLtmp[:,0:2]
 ptsR2tmp = ptsRtmp[:,0:2]
 
-retval, R, t, mask = cv.recoverPose(E, ptsL2tmp, ptsR2tmp, K)
+# Recoverpose uses Singular Value Decomposition in least_squares way. Outliers are masked
+retval, Rot, t, mask = cv.recoverPose(E, ptsL2tmp, ptsR2tmp, K)
+
 #ptsL = ptsL[mask.ravel()!=0]
 #ptsR = ptsR[mask.ravel()!=0]
 
@@ -296,10 +298,10 @@ ptsL2 = ptsL[:,0:2]
 ptsR2 = ptsR[:,0:2]
 
 
-extr_R = np.concatenate((R,t),axis = 1)
+extr_R = np.concatenate((Rot,t),axis = 1)
 
 print("Rotation and translation")
-print(R)
+print(Rot)
 print(t)
 
 P_L = np.matmul(K,extr_L)
@@ -311,18 +313,22 @@ print(P_R)
 ptsL2 = np.transpose(ptsL2)
 ptsR2 = np.transpose(ptsR2)
 
-
+#Projects 2D points into 3D space by P_R and P_L, and uses least-square matching...
 PTS = cv.triangulatePoints(P_R,P_L,ptsR2,ptsL2)
 
 PTS /= PTS[3]
 print(PTS.shape)
 #U,S,V = torch.svd(D, some=False, compute_uv=True, out=None)
 #print(U.shape)
-P = torch.from_numpy(np.concatenate((P_L,P_R),axis = 0))#.cuda()
+
+P = torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)) #construction of Camera Matrices
+P_bef = P
+if(cuda):
+    P.cuda()
 
 D_list = [ptsL,ptsR]
 Darr = np.array(D_list).reshape(6,-1)
-D = torch.from_numpy(Darr)#.cuda()
+
 
 p = PTS[3,:]
 xn = PTS[0,:] 
@@ -414,8 +420,9 @@ print("bp")
 # Generate P and X using triangulation, getting somewhat good prior to begin with
 
 
+# Now given a very good prior that utilizes triangulation, Bundle adjustment may be used in order to further reduce reprojection error.
 
-print(D.shape)
+
 # Pyro Code Start
 from pyro.optim import Adam
 from pyro.infer import SVI, Trace_ELBO
@@ -423,35 +430,77 @@ import pyro.distributions as dist
 import torch.distributions.constraints as constraints
 import pyro.contrib.autoguide as autoguide
 # this is for running the notebook in our testing framework
+torch.set_default_tensor_type('torch.FloatTensor')
+
 smoke_test = ('CI' in os.environ)
-n_steps = 2 if smoke_test else 10000
-
-# enable validation (e.g. validate parameters of distributions)
-#assert pyro.__version__.startswith('1.3.0')
 pyro.enable_validation(True)
-
-# clear the param store in case we're in a REPL
 pyro.clear_param_store()
 
-Data = torch.flatten(D)
-P_ones = torch.ones([P.shape[0],P.shape[1]])
-prior = torch.from_numpy(PTS)#.cuda()
-prior_sigma = 0.03*torch.ones([4,D.shape[1]])#.cuda()
-ones_sigma = torch.ones([D.shape[0],D.shape[1]])#.cuda()
+#Define Number of steps to be used
+n_steps = 2 if smoke_test else 10000
 
+
+#Loading Necessary Parameters
+R_prior = torch.from_numpy(Rot)
+t_prior = torch.from_numpy(t)
+D_prior = torch.from_numpy(Darr)
+prior = torch.from_numpy(PTS)
+
+#From R try to extract alpha,beta,gamma
+alpha_prior     = math.atan2(R_prior[2,1],R_prior[2,2]) 
+beta_prior      = math.atan2(-R_prior[2,0],math.sqrt(math.pow(R_prior[2,1],2) + math.pow(R_prior[2,2],2))) 
+gamma_prior     = math.atan2(R_prior[1,0],R_prior[0,0]) 
+
+
+
+if(cuda):
+    D.cuda()
+    R.cuda()
+    t.cuda()
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    prior.cuda()
+
+#Pre-made Zeros or Ones distributions
+P_ones = torch.ones([P.shape[0],P.shape[1]])
+prior_sigma = 0.03*torch.ones([4,prior.shape[1]])
+ones_sigma = torch.ones([D_prior.shape[0],D_prior.shape[1]])
+
+if(cuda):
+    P_ones.cuda()
+    prior.cuda()
+    prior_sigma.cuda()
+    ones_sigma.cuda()
 
 
 def model(data):
     # define the hyperparameters that control the beta prior
-    P0 = P
-    #X0 = prior
-    #P0 = torch.zeros([P.shape[0],P.shape[1]])
-    X0 = torch.zeros([prior.shape[0],prior.shape[1]])
 
-    p_x_axis = pyro.plate("p_x_axis", P0.shape[1])
-    p_y_axis = pyro.plate("p_y_axis", P0.shape[0])
-    with p_x_axis, p_y_axis:
-        Px = pyro.sample('P', dist.Normal(P0, P_ones))
+    #P0 = torch.zeros([P.shape[0],P.shape[1]])
+    #X0 = torch.zeros([prior.shape[0],prior.shape[1]])
+    X0 = prior
+
+    #TODO: R t constraints 추가해서 조금 더 현실적으로 ㄱㄱ
+    #Properties of P --> P = K * Extr
+    #Extrinsic Sampling 하기
+    alpha = pyro.sample('alpha', dist.Normal(alpha_prior,0.01))
+    beta = pyro.sample('beta', dist.Normal(beta_prior,0.01))
+    gamma = pyro.sample('gamma', dist.Normal(gamma_prior,0.01))
+
+    x_t = pyro.sample('x_t', dist.Normal(t_prior[0],0.01))
+    y_t = pyro.sample('y_t', dist.Normal(t_prior[1],0.01))
+    z_t = pyro.sample('z_t', dist.Normal(t_prior[2],0.01))
+    #Construct P using info sampled above
+    alpha_mat = torch.tensor([   [1.,0.,0.],                            [0.,math.cos(alpha),-math.sin(alpha)],  [0.,math.sin(alpha),math.cos(alpha)]])
+    beta_mat = torch.tensor ([   [math.cos(beta),0.,math.sin(beta)],    [0.,1.,0.],                             [-math.sin(beta),0.,math.cos(beta)]])
+    gamma_mat = torch.tensor([   [math.cos(gamma),-math.sin(gamma),0.], [math.sin(gamma),math.cos(gamma),0.],   [0.,0.,1.]])
+
+    R = torch.mm(torch.mm(alpha_mat,beta_mat),gamma_mat)    #3x3
+    t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
+    extr_R = torch.cat((R,t),1)                             #3x4
+
+    P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+    Px =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+
 
 
     X_x_axis = pyro.plate("X_x_axis", X0.shape[1])
@@ -459,38 +508,76 @@ def model(data):
     #Px = P
     with X_x_axis, X_y_axis:
         X = pyro.sample('X', dist.Normal(X0, prior_sigma))
+        if(cuda):
+            X.cuda()
 
-    res = torch.mm(Px,X)#.cuda() # reproject 를 한 것.
-    res = res/res[3]
+    res = torch.mm(Px,X)# reproject 를 한 것.
+    if(cuda):
+        res.cuda()
+    #res = res/res[3]
     D_x_axis = pyro.plate("D_x_axis", data.shape[1])
     D_y_axis = pyro.plate("D_y_axis", data.shape[0])
     with D_x_axis,D_y_axis:
         pyro.sample('obs', dist.Normal(res,ones_sigma), obs=data)
 
-P_nil = torch.tensor(600*np.ones((P.shape[0],P.shape[1])))
-prior_nil = torch.tensor(np.ones((prior.shape[0],prior.shape[1])))
+P_nil = torch.tensor(600*np.ones((P.shape[0],P.shape[1]))).cuda()
+prior_nil = torch.tensor(np.ones((prior.shape[0],prior.shape[1]))).cuda()
 
 #guide = autoguide.AutoDiagonalNormal(model)
 def guide(data):
     # define the hyperparameters that control the beta prior
 
-    p_x_axis = pyro.plate("p_x_axis", P.shape[1])
-    p_y_axis = pyro.plate("p_y_axis", P.shape[0])
+
     X_x_axis = pyro.plate("X_x_axis", prior.shape[1])
     X_y_axis = pyro.plate("X_y_axis", prior.shape[0])
 
-    P_q = pyro.param("P_q", torch.zeros([P.shape[0],P.shape[1]]))
+    #TODO: R t constraints 추가해서 조금 더 현실적으로 ㄱㄱ
     X_q = pyro.param("X_q", torch.zeros([prior.shape[0],prior.shape[1]]))
 
-    with p_x_axis, p_y_axis:
-        Px = pyro.sample('P', dist.Normal(P_q, P_ones))
+    alpha_q =       pyro.param("alpha_q",torch.tensor(alpha_prior))
+    beta_q =        pyro.param("beta_q",torch.tensor(beta_prior))
+    gamma_q =       pyro.param("gamma_q",torch.tensor(gamma_prior))
+    x_t_q =         pyro.param("x_t_q",torch.tensor(t_prior[0]))
+    y_t_q =         pyro.param("y_t_q",torch.tensor(t_prior[1]))
+    z_t_q =         pyro.param("z_t_q",torch.tensor(t_prior[2]))
+
+    alpha = pyro.sample('alpha', dist.Normal(alpha_q,1))
+    beta = pyro.sample('beta', dist.Normal(beta_q,1))
+    gamma = pyro.sample('gamma', dist.Normal(gamma_q,1))
+
+    x_t = pyro.sample('x_t', dist.Normal(x_t_q,1))
+    y_t = pyro.sample('y_t', dist.Normal(y_t_q,1))
+    z_t = pyro.sample('z_t', dist.Normal(z_t_q,1))
+    #Construct P using info sampled above
+    alpha_mat = torch.tensor([   [1.,0.,0.],                            [0.,math.cos(alpha),-math.sin(alpha)],  [0.,math.sin(alpha),math.cos(alpha)]])
+    beta_mat = torch.tensor ([   [math.cos(beta),0.,math.sin(beta)],    [0.,1.,0.],                             [-math.sin(beta),0.,math.cos(beta)]])
+    gamma_mat = torch.tensor([   [math.cos(gamma),-math.sin(gamma),0.], [math.sin(gamma),math.cos(gamma),0.],   [0.,0.,1.]])
+
+    R = torch.mm(torch.mm(alpha_mat,beta_mat),gamma_mat)    #3x3
+    t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
+    extr_R = torch.cat((R,t),1)                             #3x4
+
+    P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+    Px =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+
+    if(cuda):
+        X_q.cuda()
+        Px.cuda()
+
+
     
     #Px = P
     with X_x_axis, X_y_axis:
         X = pyro.sample('X', dist.Normal(X_q, prior_sigma))
+        div = X[3,:].clone()
+        X /= div
+        if(cuda):
+            X.cuda()
 
-    res = torch.mm(Px,X)#.cuda() # reproject 를 한 것.
-    res = res/res[3]
+    res = torch.mm(Px,X) # reproject 를 한 것.
+    if(cuda):
+        res.cuda()
+    #res = res/res[3]
     D_x_axis = pyro.plate("D_x_axis", data.shape[1])
     D_y_axis = pyro.plate("D_y_axis", data.shape[0])
     with D_x_axis,D_y_axis:
@@ -499,7 +586,9 @@ def guide(data):
     #res 가 sample 결과고, 비교대상이 D <- observation
 # setup the optimizer
 loss = pyro.infer.JitTraceGraph_ELBO()
-adam_params = {"lr": 0.0005}
+
+adam_params = {"lr": 0.005, "betas": (0.95, 0.999)}
+
 optimizer = Adam(adam_params)
 
 #guide = autoguide.AutoDiagonalNormal(model)
@@ -511,14 +600,46 @@ loss = pyro.infer.JitTraceGraph_ELBO()
 
 losses = np.empty(n_steps)
 for step in range(n_steps):
-    losses[step] = svi.step(D)
+    losses[step] = svi.step(D_prior)
     if step % 100 == 0:
         print(f"step: {step:>5}, ELBO loss: {losses[step]:.2f}")
     #return res # 각 사진 위에 xy 지점들
 
 posterior = pyro.infer.Predictive
 X = pyro.param("X_q")
+
+alpha =       pyro.param("alpha_q")
+beta =        pyro.param("beta_q")
+gamma =       pyro.param("gamma_q")
+x_t =         pyro.param("x_t_q")
+y_t =         pyro.param("y_t_q")
+z_t =         pyro.param("z_t_q")
+alpha_mat = torch.tensor([   [1.,0.,0.],                            [0.,math.cos(alpha),-math.sin(alpha)],  [0.,math.sin(alpha),math.cos(alpha)]])
+beta_mat = torch.tensor ([   [math.cos(beta),0.,math.sin(beta)],    [0.,1.,0.],                             [-math.sin(beta),0.,math.cos(beta)]])
+gamma_mat = torch.tensor([   [math.cos(gamma),-math.sin(gamma),0.], [math.sin(gamma),math.cos(gamma),0.],   [0.,0.,1.]])
+
+R = torch.mm(torch.mm(alpha_mat,beta_mat),gamma_mat)    #3x3
+t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
+extr_R = torch.cat((R,t),1)                             #3x4
+
+P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+P_after =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+
 print(type(X))
+
+#prior vs X 비교하자   --- D-2D  prior3d
+
+Reproject_before = torch.mm(P_bef,prior)
+Reproject_after  = torch.mm(P_after,X)
+
+dist_prior1 = torch.dist(D_prior,Reproject_before,2)
+dist_prior2 = torch.dist(D_prior,Reproject_after,2)
+
+print("distance prior: " + str(dist_prior1) + " --- inferred: " + str(dist_prior2))
+
+
+
+
 
 '''
 #torch.set_default_tensor_type('torch.cuda.FloatTensor')
@@ -594,12 +715,16 @@ colors = []
 idx = 0
 
 numfilter = 0
-
+num_imgconst = 0
 for (i, j, k) in zip(xn, yn, zn):
     posx = ptsL2[0][idx] + L_mean[0]
     posy = ptsL2[1][idx] + L_mean[1]
+    
+    img_constraint = posx < maxwidth and posy < maxheight and posx >= 0 and posy >= 0
+    if(not img_constraint):
+        num_imgconst += 1
 
-    if(np.sqrt(i*i + j*j + k*k) < 100 and posx < maxwidth and posy < maxheight and posx >= 0 and posy >= 0):
+    if(np.sqrt(i*i + j*j + k*k) < 100 and img_constraint):
         #if(np.sqrt(i*i + j*j + k*k) < 30):
         x.append(i)
         y.append(j)
@@ -624,6 +749,8 @@ for (i, j, k) in zip(xn, yn, zn):
     idx += 1
 
 print("Filtered:" + str(numfilter))
+print("Image constraint :" + str(num_imgconst))
+
 
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(xyz)
@@ -634,3 +761,11 @@ xyz_load = np.asarray(pcd_load.points)
 o3d.visualization.draw_geometries([pcd_load],width = 1000,height = 1000)
 
 print("bp")
+
+
+#Now to begin matching by interpolation
+
+#Given a set of points, I will try to use voronoi partitioning. 
+
+# 
+
