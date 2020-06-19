@@ -496,6 +496,7 @@ from pyro.infer import SVI, Trace_ELBO
 import pyro.distributions as dist
 import torch.distributions.constraints as constraints
 import pyro.contrib.autoguide as autoguide
+#import pymc3 as pm
 # this is for running the notebook in our testing framework
 torch.set_default_tensor_type('torch.FloatTensor')
 
@@ -504,14 +505,13 @@ pyro.enable_validation(True)
 pyro.clear_param_store()
 
 #Define Number of steps to be used
-n_steps = 2 if smoke_test else 10000
 
 
 #####################  PRIORS  #####################
-R_prior = torch.from_numpy(Rot)
-t_prior = torch.from_numpy(t)
+R_prior = torch.from_numpy(Rot).float()
+t_prior = torch.from_numpy(t).float()
 
-prior = torch.from_numpy(PTS)[:3,:] #xyz 만
+prior = torch.from_numpy(PTS)[:3,:].float() #xyz 만
 
 
 #R_prior =   torch.from_numpy(eulerAnglesToRotationMatrix(np.array([0.5,0.5,0.5])))
@@ -520,15 +520,15 @@ prior = torch.from_numpy(PTS)[:3,:] #xyz 만
 
 #####################  PRIORS  #####################
 
-D_prior = torch.from_numpy(Darr) #prior 아니라 observation...
+D_prior = torch.from_numpy(Darr).float() #prior 아니라 observation...
 #Observation from Images 각 match 의 xy
 
 
 
 #From R try to extract alpha,beta,gamma
-alpha_prior     = math.atan2(R_prior[2,1],R_prior[2,2]) 
-beta_prior      = math.atan2(-R_prior[2,0],math.sqrt(math.pow(R_prior[2,1],2) + math.pow(R_prior[2,2],2))) 
-gamma_prior     = math.atan2(R_prior[1,0],R_prior[0,0]) 
+alpha_prior     = float(math.atan2(R_prior[2,1],R_prior[2,2]) )
+beta_prior      = float(math.atan2(-R_prior[2,0],math.sqrt(math.pow(R_prior[2,1],2) + math.pow(R_prior[2,2],2))) )
+gamma_prior     = float(math.atan2(R_prior[1,0],R_prior[0,0]) )
 
 
 if(cuda):
@@ -540,8 +540,9 @@ if(cuda):
 
 #Pre-made Zeros or Ones distributions
 P_ones = torch.ones([P.shape[0],P.shape[1]])
-prior_sigma = torch.ones([3,prior.shape[1]])
-ones_sigma = torch.ones([D_prior.shape[0],D_prior.shape[1]])
+
+prior_sigma =   0.1    *   torch.ones([3,prior.shape[1]])
+ones_sigma =    0.1    *   torch.ones([D_prior.shape[0],D_prior.shape[1]])
 
 #######################TEST TEST TEST############################
 
@@ -558,25 +559,20 @@ guide_y = 5.0#t[1] + 0.3
 guide_z = 5.0#t[2] + 0.3
 
 [alpha,beta,gamma] = rotationMatrixToEulerAngles(R_prior.numpy())
-R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float()
-t = torch.tensor([[x_t],[y_t],[z_t]]).float()                     #3x1
-extr_R = torch.cat((R,t),1)                             #3x4
 
-P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+alpha = float(alpha)
+beta = float(beta)
+gamma = float(gamma)
 
-Px =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+R =         torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float()
+t =         torch.tensor([[x_t],[y_t],[z_t]]).float()                 #3x1
+extr_R =    torch.cat((R,t),1).float()                             #3x4
 
-#prior = torch.from_numpy(PTS)#torch.ones([prior.shape[0],prior.shape[1]]) 
+P_R =       torch.mm(torch.from_numpy(K).float(),extr_R)
 
-#######################TEST TEST TEST############################
-#P_nil = torch.tensor(600*np.ones((P.shape[0],P.shape[1])))#.cuda()
-prior_nil = torch.tensor(1 * np.ones((prior.shape[0],prior.shape[1])))#.cuda()
-prior_zero = torch.tensor(np.zeros((prior.shape[0],prior.shape[1])))
-
-#noise = 0.5*(torch.rand(prior.shape[0],prior.shape[1]).float() - 0.5*torch.ones(prior.shape[0],prior.shape[1]).float())
+Px =        torch.from_numpy(np.concatenate((P_L,P_R),axis = 0))
 
 prior_init =        prior# + noise #torch.tensor(np.zeros((prior.shape[0],prior.shape[1])))#prior  
-prior_init_guide =  torch.tensor(np.zeros((prior.shape[0],prior.shape[1])))
 
 if(cuda):
     P_ones.cuda()
@@ -584,100 +580,151 @@ if(cuda):
     prior_sigma.cuda()
     ones_sigma.cuda()
 
+zeros = torch.zeros(1)
+one = torch.ones(1)
+'''
+def pm_model(data):
+    with pm.Model() as model:
+        alpha = float(pm.Normal('alpha',    mu=alpha_prior, sd=0.1))
+        beta  = float(pm.Normal('beta',     mu=beta_prior,  sd=0.1))
+        gamma = float(pm.Normal('gamma',    mu=gamma_prior, sd=0.1))
 
+        x_t = float(pm.Normal('x_t',mu = t_prior[0],sd=0.1))
+        y_t = float(pm.Normal('y_t',mu = t_prior[1],sd=0.1))
+        z_t = float(pm.Normal('z_t',mu = t_prior[2],sd=0.1))
+
+        
+
+        l = pm.Gamma('l', alpha, beta)
+        pm.Poisson('obs', l, observed=data)
+    return model
+
+'''
+'''
 def model(data):
 
     X0 = prior_init
 
     ##############################################################
-    alpha = pyro.sample('alpha',    dist.Normal(alpha_prior,1))
-    beta  = pyro.sample('beta',     dist.Normal(beta_prior,1))
-    gamma = pyro.sample('gamma',    dist.Normal(gamma_prior,1))
+    alpha = float(pyro.sample('alpha',    dist.Normal(alpha_prior,0.05)))
+    beta  = float(pyro.sample('beta',     dist.Normal(beta_prior,0.05)))
+    gamma = float(pyro.sample('gamma',    dist.Normal(gamma_prior,0.05)))
     
 
-    x_t = pyro.sample('x_t', dist.Normal(t_prior[0],0.5))
-    y_t = pyro.sample('y_t', dist.Normal(t_prior[1],0.5))
-    z_t = pyro.sample('z_t', dist.Normal(t_prior[2],0.5))
+    x_t = float(pyro.sample('x_t', dist.Normal(t_prior[0],0.05)))
+    y_t = float(pyro.sample('y_t', dist.Normal(t_prior[1],0.05)))
+    z_t = float(pyro.sample('z_t', dist.Normal(t_prior[2],0.05)))
     #Construct P using info sampled above
     ##############################################################
 
 
-    R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma])))
-    t = torch.tensor([[x_t],[y_t],[z_t]])                     #3x1
-    extr_R = torch.cat((R,t),1)                             #3x4
+    R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float()
+    t = torch.tensor([[x_t],[y_t],[z_t]])                   #3x1
+    extr_R = torch.cat((R,t),1).float()                             #3x4
 
-    P_R = torch.mm(torch.from_numpy(K),extr_R)
+    P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
 
     Px = torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
 
-    X_x_axis = pyro.plate("X_x_axis", X0.shape[1])
-    X_y_axis = pyro.plate("X_y_axis", X0.shape[0])
-    #Px = P
+    ##Px = P
 
     #이제부터는, X 만 Sample 하자
-    with X_x_axis, X_y_axis:
+    with pyro.plate("x_sample"):
         X = pyro.sample('X', dist.Normal(X0, prior_sigma))
         if(cuda):
             X.cuda()
+
     X2 = X.clone().detach().float()
-    add1 = torch.ones((1,X2.shape[1])).float()
-    new_x = torch.cat((X2,add1),0)
+    add1 = torch.ones((1,X2.shape[1]))
+    new_x = torch.cat((X2,add1),0).float()
 
 
-    res = torch.mm(Px,new_x).float()# reproject 를 한 것.
+    res = torch.mm(Px,new_x)# reproject 를 한 것.
     
     #distance = torch.dist(res,data,p = 2)
 
     if(cuda):
         res.cuda()
-   
-    D_x_axis = pyro.plate("D_x_axis", data.shape[1])
-    D_y_axis = pyro.plate("D_y_axis", data.shape[0])
-    with D_x_axis,D_y_axis:
-        pyro.sample('obs', dist.Normal(res,ones_sigma), obs=data)
+
+    #distance = torch.dist(data,res,2)
+    
+    #y = pyro.sample('y', dist.Normal(distance,one), obs=zeros)    
+    #return y
+    with pyro.plate("data"):
+        y = pyro.sample('y', dist.Normal(res,ones_sigma), obs=data)
+    return y
+'''
+###############################################################
+def model(truth):
+
+    ##############################################################
+    alpha = pyro.sample('alpha',    dist.Normal(alpha_prior,0.05))
+    beta  = pyro.sample('beta',     dist.Normal(beta_prior,0.05))
+    gamma = pyro.sample('gamma',    dist.Normal(gamma_prior,0.05))
+    
+
+    x_t = pyro.sample('x_t', dist.Normal(t_prior[0],0.05))
+    y_t = pyro.sample('y_t', dist.Normal(t_prior[1],0.05))
+    z_t = pyro.sample('z_t', dist.Normal(t_prior[2],0.05))
+    #Construct P using info sampled above
+    ##############################################################
+
+
+    R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float()
+    t = torch.tensor([[x_t],[y_t],[z_t]])                   #3x1
+    extr_R = torch.cat((R,t),1).float()                             #3x4
+
+    P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
+
+    Px = torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+
+
+    X = pyro.sample('X', dist.Normal(prior_init, prior_sigma)).float()
+
+    X2 = X.clone().detach().float()
+    add1 = torch.ones((1,X2.shape[1]))
+    new_x = torch.cat((X2,add1),0).float()
+
+    res = torch.mm(Px,new_x).float()#.cuda() # reproject 를 한 것.
+    res = res/res[3].float()
+
+    distance = torch.dist(truth,res,2)
+    
+    y = pyro.sample('y', dist.Normal(distance,one), obs=zeros)
+    return y
+
+
 
 ################################################################
 #adam_params = {"lr": 0.001, "betas": (0.90, 0.999)}
 #optimizer = Adam(adam_params)
 #svi = SVI(model, guide, optimizer, loss = Trace_ELBO())
 
-nuts_kernel = NUTS(model, adapt_step_size=True)
-mcmc_run = MCMC(nuts_kernel, num_samples=500, warmup_steps=300).run(D_prior)
-
+nuts_kernel = NUTS(model, adapt_step_size=True,jit_compile=True)
+mcmc = MCMC(nuts_kernel, num_samples=50, warmup_steps=30)
+mcmc.run(D_prior)
 ################################################################
+results = mcmc.get_samples(num_samples = 10)
+
+X = results['X'].mean(0)
+
+alpha = results['alpha'].mean(0)
+beta =  results['beta'].mean(0)
+gamma = results['gamma'].mean(0)
+
+x_t = results['x_t'].mean(0)
+y_t = results['y_t'].mean(0)
+z_t = results['z_t'].mean(0)
 
 
-X_sample = EmpiricalMarginal(mcmc_run, 'X')
-X = X_sample.mean  
-
-alpha_sample =       EmpiricalMarginal(mcmc_run, 'alpha')
-alpha = alpha_sample.mean
-
-beta_sample =        EmpiricalMarginal(mcmc_run, 'beta')
-beta = beta_sample.mean
-
-gamma_sample =       EmpiricalMarginal(mcmc_run, 'gamma')
-gamma = gamma_sample.mean
-
-x_t_sample =         EmpiricalMarginal(mcmc_run, 'x_t')
-x_t = x_t_sample.mean
-
-y_t_sample =         EmpiricalMarginal(mcmc_run, 'y_t')
-y_t = y_t_sample.mean
-
-z_t_sample =         EmpiricalMarginal(mcmc_run, 'z_t')
-z_t = z_t_sample.mean
-
-
-
-R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))).float() 
-t = torch.tensor([[x_t],[y_t],[z_t]]).float()                 #3x1
-extr_R = torch.cat((R,t),1)                             #3x4
+R = torch.from_numpy(eulerAnglesToRotationMatrix(np.array([alpha,beta,gamma]))) 
+t = torch.tensor([[x_t],[y_t],[z_t]])                 #3x1
+extr_R = torch.cat((R.float(),t),1)                             #3x4
 
 #Camera2 의 Rotation Translation 그리고 X의 위치
 
 P_R = torch.mm(torch.from_numpy(K).float(),extr_R)
-P_after =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0)).float()
+P_after =  torch.from_numpy(np.concatenate((P_L,P_R),axis = 0))
 
 print(type(X))
 
@@ -685,15 +732,15 @@ print(type(X))
 
 prior = prior.clone()
 add1 = torch.ones((1,prior.shape[1]))
-prior = torch.cat((prior.float(),add1.float()),0)
+prior = torch.cat((prior,add1),0)
 
 X = X.clone()
 add2 = torch.ones((1,X.shape[1]))
-X = torch.cat((X.float(),add2.float()),0)
+X = torch.cat((X,add2),0)
 
 
-Reproject_before = torch.mm(P_bef.float(),prior.float())
-Reproject_after  = torch.mm(P_after,X.float())
+Reproject_before = torch.mm(P_bef.float(),prior)
+Reproject_after  = torch.mm(P_after.float(),X)
 
 dist_prior1 = torch.dist(D_prior,Reproject_before,2)
 dist_prior2 = torch.dist(D_prior,Reproject_after,2)
